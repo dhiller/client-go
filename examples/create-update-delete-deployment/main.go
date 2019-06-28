@@ -21,11 +21,13 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"os"
 	"path/filepath"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/api/policy/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -62,17 +64,18 @@ func main() {
 
 	deploymentsClient := clientset.AppsV1().Deployments(apiv1.NamespaceDefault)
 
+	selector := &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"app": "demo",
+		},
+	}
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "demo-deployment",
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: int32Ptr(2),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app": "demo",
-				},
-			},
+			Selector: selector,
 			Template: apiv1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -105,6 +108,30 @@ func main() {
 		panic(err)
 	}
 	fmt.Printf("Created deployment %q.\n", result.GetObjectMeta().GetName())
+
+	prompt()
+	fmt.Println("Creating PDB...")
+	minAvailable := intstr.FromInt(int(1))
+	name := "demo-pdb"
+	podDisruptionBudget := &v1beta1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: apiv1.NamespaceDefault,
+			Name:      name,
+			Labels: map[string]string{
+				"app": "demo",
+			},
+		},
+		Spec: v1beta1.PodDisruptionBudgetSpec{
+			MinAvailable: &minAvailable,
+			Selector: selector,
+		},
+	}
+	pdbClient := clientset.PolicyV1beta1().PodDisruptionBudgets(apiv1.NamespaceDefault)
+	_, err = pdbClient.Create(podDisruptionBudget)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Created PDB.")
 
 	// Update Deployment
 	prompt()
@@ -151,6 +178,21 @@ func main() {
 		fmt.Printf(" * %s (%d replicas)\n", d.Name, *d.Spec.Replicas)
 	}
 
+	// List PDBs
+	prompt()
+	fmt.Printf("Listing PDBs in namespace %q:\n", apiv1.NamespaceDefault)
+	pdbList, err := pdbClient.List(metav1.ListOptions{})
+	if err != nil {
+		panic(err)
+	}
+	for _, p := range pdbList.Items {
+		if p.Spec.MinAvailable != nil {
+			fmt.Printf(" * %s (%d MinAvailable, %d Selector)\n", p.Name, &p.Spec.MinAvailable, *p.Spec.Selector)
+		} else {
+			fmt.Printf(" * %s (%d MaxUnavailable, %d Selector)\n", p.Name, &p.Spec.MaxUnavailable, *p.Spec.Selector)
+		}
+	}
+
 	// Delete Deployment
 	prompt()
 	fmt.Println("Deleting deployment...")
@@ -161,6 +203,14 @@ func main() {
 		panic(err)
 	}
 	fmt.Println("Deleted deployment.")
+
+	prompt()
+	fmt.Println("Deleting PDB.")
+	err = pdbClient.Delete(name, &metav1.DeleteOptions{})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Deleted PDB.")
 }
 
 func prompt() {
